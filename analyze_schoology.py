@@ -8,9 +8,10 @@ from pathlib import Path
 from androguard.core.apk import APK
 from androguard.core.dex import DEX
 
-APK_PATH = Path("/Users/ryan/schoology-re/apk/schoology.apk")
-DEX_DIR = Path("/Users/ryan/schoology-re/dex")
-OUT_JSON = Path("/Users/ryan/schoology-re/analysis_data.json")
+_SCRIPT_DIR = Path(__file__).resolve().parent
+APK_PATH = _SCRIPT_DIR / "apk" / "schoology.apk"
+DEX_DIR = _SCRIPT_DIR / "dex"
+OUT_JSON = _SCRIPT_DIR / "analysis_data.json"
 APP_PREFIX = "Lcom/schoology/app/"
 APP_DOT_PREFIX = "com.schoology.app."
 MAJOR_PACKAGES = [
