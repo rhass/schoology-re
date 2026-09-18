@@ -1,0 +1,34 @@
+# APK and related files - EXCLUDED to avoid copyright redistribution
+apk/
+dex/
+decompiled_java/
+extracted/
+
+# Raw extractions and dumps - may contain proprietary data
+strings.txt
+analysis_data.json
+secrets_candidates.txt
+apk_analysis.txt
+manifest_analysis.md
+google_sdk.txt
+facebook_sdk.txt
+crashlytics_sdk.txt
+domains_dex.txt
+urls_dex1.txt
+urls_dex2.txt
+urls_dex3.txt
+oauth_tokens.txt
+
+# Burp project files - keep settings but exclude raw captures if they contain sensitive data
+# Note: We keep burp_project_settings.json as it's configuration, not raw traffic
+# If you have raw .burp files or exports, add them here:
+# *.burp
+# burp_*
+
+# Build artifacts and temporary files
+.DS_Thumbs.db
+Thumbs.db
+.env
+*.log
+*.tmp
+*.temp

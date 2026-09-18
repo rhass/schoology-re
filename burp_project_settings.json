@@ -1,0 +1,82 @@
+{
+  "project_options": {
+    "proxy": {
+      "intercept_client_requests": {
+        "do_intercept": false,
+        "rules": [
+          {
+            "boolean_operator": "and",
+            "enabled": true,
+            "match_condition": "(^gif$|^jpg$|^png$|^css$|^js$|^ico$|^svg$|^eot$|^woff$|^woff2$|^ttf$)",
+            "match_relationship": "does_not_match",
+            "match_type": "file_extension"
+          },
+          {
+            "boolean_operator": "or",
+            "enabled": false,
+            "match_relationship": "contains_parameters",
+            "match_type": "request"
+          },
+          {
+            "boolean_operator": "or",
+            "enabled": false,
+            "match_condition": "(get|post)",
+            "match_relationship": "does_not_match",
+            "match_type": "http_method"
+          },
+          {
+            "boolean_operator": "and",
+            "enabled": false,
+            "match_relationship": "is_in_target_scope",
+            "match_type": "url"
+          },
+          {
+            "boolean_operator": "and",
+            "enabled": true,
+            "match_condition": "^api\\.schoology\\.com$",
+            "match_relationship": "does_not_match",
+            "match_type": "domain_name"
+          },
+          {
+            "boolean_operator": "and",
+            "enabled": true,
+            "match_condition": "^homeassistant\\.local$",
+            "match_relationship": "does_not_match",
+            "match_type": "domain_name"
+          },
+          {
+            "boolean_operator": "and",
+            "enabled": true,
+            "match_condition": "^connectivitycheck\\.gstatic\\.com$",
+            "match_relationship": "does_not_match",
+            "match_type": "domain_name"
+          },
+          {
+            "boolean_operator": "and",
+            "enabled": true,
+            "match_condition": "^www\\.google\\.com$",
+            "match_relationship": "does_not_match",
+            "match_type": "domain_name"
+          }
+        ]
+      },
+      "intercept_server_responses": {
+        "do_intercept": false,
+        "rules": [
+          {
+            "boolean_operator": "or",
+            "enabled": true,
+            "match_condition": "text",
+            "match_relationship": "matches",
+            "match_type": "content_type_header"
+          }
+        ]
+      },
+      "ssl_pass_through": {
+        "apply_to_out_of_scope_items": true,
+        "automatically_add_entries_on_client_ssl_negotiation_failure": false,
+        "rules": []
+      }
+    }
+  }
+}

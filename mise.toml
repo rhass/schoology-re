@@ -1,0 +1,9 @@
+[tools]
+java = "17"
+node = "latest"
+python = "latest"
+uv = "latest"
+
+"github:skylot/jadx" = { version = "latest", asset_pattern = "jadx-*.zip" }
+"github:pxb1988/dex2jar" = { version = "2.4" }
+"github:Vineflower/vineflower" = { version = "latest", asset_pattern = "vineflower-*.jar" }

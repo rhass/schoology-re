@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# android/.mise-tasks/bootstrap
+# Idempotent: downloads cmdline-tools, accepts licenses, installs
+# platforms;android-35 + build-tools;35.0.0 + platform-tools, writes
+# local.properties, bootstraps gradle-wrapper.jar if missing.
+#
+# This script may be invoked directly, via `mise run bootstrap` from
+# inside android/, or via `mise run android:bootstrap` from the repo
+# root. We resolve SCRIPT_DIR robustly against each invocation path.
+
+set -u
+
+# Resolve the android/ dir: it's the parent of this script's directory.
+# When invoked directly, ${BASH_SOURCE[0]} is set. When invoked via
+# mise's task runner, ${0} is the path and ${BASH_SOURCE[0]} may be empty.
+_self="${BASH_SOURCE[0]:-$0}"
+if [ -n "$_self" ] && [ -e "$_self" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "$_self")/.." && pwd)"
+else
+    SCRIPT_DIR="$PWD"
+fi
+cd "$SCRIPT_DIR"
+
+# 1. Resolve SDK root.
+if [ -n "${ANDROID_HOME:-}" ]; then
+    SDK_ROOT="$ANDROID_HOME"
+elif [ -n "${ANDROID_SDK_ROOT:-}" ]; then
+    SDK_ROOT="$ANDROID_SDK_ROOT"
+else
+    case "$(uname -s)" in
+        Darwin) SDK_ROOT="$HOME/Library/Android/sdk" ;;
+        Linux)  SDK_ROOT="$HOME/Android/Sdk" ;;
+        *) echo "ERROR: unsupported OS: $(uname -s)" >&2; exit 1 ;;
+    esac
+fi
+echo "Android SDK root: $SDK_ROOT"
+mkdir -p "$SDK_ROOT"
+
+# 2. Locate a JDK17 to feed sdkmanager. Try mise, then PATH, then
+# conventional install locations.
+find_java_home() {
+    if command -v mise >/dev/null 2>&1; then
+        local mj
+        mj="$(mise where java 2>/dev/null || true)"
+        if [ -n "$mj" ] && [ -x "$mj/bin/java" ]; then echo "$mj"; return 0; fi
+    fi
+    if command -v java >/dev/null 2>&1; then
+        local j
+        j="$(command -v java)"
+        local parent
+        parent="$(cd "$(dirname "$j")/.." && pwd)"
+        if [ -x "$parent/bin/java" ]; then echo "$parent"; return 0; fi
+    fi
+    for cand in \
+        "$HOME/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home" \
+        "/opt/homebrew/opt/openjdk@17" \
+        "/usr/lib/jvm/java-17-openjdk" \
+        "/usr/lib/jvm/temurin-17-jdk" \
+        "/usr/lib/jvm/java-17-openjdk-amd64"; do
+        if [ -x "$cand/bin/java" ]; then echo "$cand"; return 0; fi
+    done
+    return 1
+}
+if JAVA_HOME_RESOLVED="$(find_java_home)"; then
+    export JAVA_HOME="$JAVA_HOME_RESOLVED"
+    export PATH="$JAVA_HOME/bin:$PATH"
+    echo "Using JAVA_HOME=$JAVA_HOME"
+else
+    echo "ERROR: no JDK 17 found. Run 'mise install' from android/ first." >&2
+    exit 1
+fi
+
+# 3. Ensure sdkmanager is available.
+SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+if [ ! -x "$SDKMANAGER" ]; then
+    echo "sdkmanager not found at $SDKMANAGER; installing cmdline-tools..."
+    case "$(uname -s)" in
+        Darwin) CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-mac-13114758_latest.zip" ;;
+        Linux)  CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip" ;;
+        *) echo "ERROR: unsupported OS for cmdline-tools download" >&2; exit 1 ;;
+    esac
+    TMP_DIR="$(mktemp -d)"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --retry 3 -o "$TMP_DIR/cmdline-tools.zip" "$CMDLINE_TOOLS_URL"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$TMP_DIR/cmdline-tools.zip" "$CMDLINE_TOOLS_URL"
+    else
+        echo "ERROR: neither curl nor wget found; install one and re-run." >&2
+        rm -rf "$TMP_DIR"
+        exit 1
+    fi
+    if ! command -v unzip >/dev/null 2>&1; then
+        echo "ERROR: unzip not found; install it and re-run." >&2
+        rm -rf "$TMP_DIR"
+        exit 1
+    fi
+    unzip -q "$TMP_DIR/cmdline-tools.zip" -d "$TMP_DIR"
+    mkdir -p "$SDK_ROOT/cmdline-tools/latest"
+    mv "$TMP_DIR/cmdline-tools"/* "$SDK_ROOT/cmdline-tools/latest/" 2>/dev/null || true
+    rm -rf "$SDK_ROOT/cmdline-tools/latest/cmdline-tools" 2>/dev/null || true
+    chmod +x "$SDKMANAGER"
+    rm -rf "$TMP_DIR"
+    echo "Installed cmdline-tools to $SDK_ROOT/cmdline-tools/latest/"
+fi
+
+# 4. Accept licenses + install required components.
+# Use `set +e` and explicit || true because `yes` exits with SIGPIPE when
+# sdkmanager stops reading, which is normal — not an error.
+set +e
+echo "Accepting SDK licenses..."
+yes 2>/dev/null | "$SDKMANAGER" --licenses >/dev/null 2>&1
+echo "Installing platforms;android-35 + build-tools;35.0.0 + platform-tools..."
+"$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" "platform-tools" 2>&1 | tail -3
+set -e
+
+# 5. Write local.properties if missing.
+# NOTE: do NOT use `cat > file <<EOF` here. When this script is invoked via
+# mise's task wrapper, all stdout is captured into a pipe and the cat
+# reads from that pipe instead of the heredoc source — the file ends up
+# filled with the entire script's output. Use printf + redirection instead.
+if [ ! -f "$SCRIPT_DIR/local.properties" ]; then
+    printf '%s\n' \
+        "# Auto-generated by mise run bootstrap. Do not commit." \
+        "sdk.dir=$SDK_ROOT" \
+        > "$SCRIPT_DIR/local.properties"
+    echo "Wrote $SCRIPT_DIR/local.properties"
+fi
+
+# 6. Bootstrap the Gradle wrapper if missing.
+WRAPPER_JAR="$SCRIPT_DIR/gradle/wrapper/gradle-wrapper.jar"
+WRAPPER_PROPS="$SCRIPT_DIR/gradle/wrapper/gradle-wrapper.properties"
+if [ ! -f "$WRAPPER_JAR" ]; then
+    echo "Gradle wrapper jar missing; running 'gradle wrapper' to generate it..."
+    if command -v gradle >/dev/null 2>&1; then
+        cd "$SCRIPT_DIR"
+        gradle wrapper --gradle-version "$(grep -E '^distributionUrl=' "$WRAPPER_PROPS" 2>/dev/null | sed -E 's/.*gradle-([0-9.]+)-.*/\1/' || echo 8.7)"
+        chmod +x "$SCRIPT_DIR/gradlew"
+        echo "Generated Gradle wrapper."
+    else
+        echo "WARN: gradle not on PATH; wrapper not regenerated. Run 'mise install' to provision gradle." >&2
+    fi
+fi
+
+echo ""
+echo "Android SDK ready at: $SDK_ROOT"
+echo "Next: mise run assemble"
