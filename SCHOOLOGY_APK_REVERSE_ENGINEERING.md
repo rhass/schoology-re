@@ -531,7 +531,7 @@ SyncManager (singleton)
 - Google API key found in resources (removed from published documentation)
 
 ### Authentication
-- OAuth 1.0a consumer key/secret in native code (no certificate pinning observed)
+- OAuth 1.0a consumer key/secret hardcoded as plaintext constants in `classes2.dex` (`com.schoology.app.api.ServerConfig.f()`/`.g()`, selected per environment, wired via `CredentialFactory`) — see `oauth_credentials.md` (gitignored); no certificate pinning observed
 
 ---
 ## 14. Burp Capture Findings (Parent Portal & PowerSchool - 2026-09-18)

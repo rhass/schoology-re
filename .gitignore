@@ -19,6 +19,9 @@ urls_dex2.txt
 urls_dex3.txt
 oauth_tokens.txt
 
+# OAuth consumer key/secret extracted from the APK (actual values)
+oauth_credentials.md
+
 # Burp project files - keep settings but exclude raw captures if they contain sensitive data
 # Note: We keep burp_project_settings.json as it's configuration, not raw traffic
 # If you have raw .burp files or exports, add them here:

@@ -22,6 +22,13 @@ oauth_signature="%s"
 ```
 Where `oauth_signature` is the URL-encoded Base64 HMAC-SHA1 hash.
 
+**Consumer Key/Secret (RESOLVED 2026-09-22):**
+- Hardcoded plaintext constants in `classes2.dex` → `com.schoology.app.api.ServerConfig` (NOT in native code; `libPDFNetC.so` is just PDFTron)
+- `ServerConfig.f()` = consumer key, `ServerConfig.g()` = consumer secret
+- Selected by environment flag `SGYEnvironment.g()`: `true` (LIVE/STAGING/SANDBOX/CANADIAN) → production pair; `false` (DEV/LOCAL) → non-production pair
+- Wired to `Credential.createToken(consumerKey, consumerSecret, authSecret, authToken)` via `CredentialFactory` (Hilt `NetworkModule`)
+- **Actual values in `oauth_credentials.md` (gitignored — do not commit)**
+
 **Signing Key** (from `OAuthPlainTextSigner`): `clientSharedSecret + "&" + tokenSharedSecret`
 
 **Base String** (from `HMacMessageGenerator.normalise()`):
