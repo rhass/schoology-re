@@ -20,7 +20,7 @@
 | App Classes (proguard-runtime) | ~3,045 |
 | DI Framework | Dagger 2 (`DaggerAppComponent`, `AppComponent`) |
 | Networking | Retrofit + OkHttp |
-| Auth | OAuth 1.0a token exchange → JWT Bearer tokens (`Authorization: Bearer <token>`) |
+| Auth | OAuth 1.0a signing on every `/v1/*` request (wire-verified 2026-09-22); JWT layer (`JwtModule`, `/jwt/token` → Bearer) present in code, retained, not observed in v2026.06.0 captures |
 | Persistence | GreenDAO (generated entities in `com.schoology.app.dbgen`) |
 | Image Loading | Glide (`GlideImageLoader`) |
 | PDF Engine | PdfTron (`com.pdftron.pdf.utils.PDFTronToolsInitializer`) |
@@ -161,52 +161,76 @@ ApplicationUtil.onCreate()
 
 ## 5. Authentication & Network Flow
 
+> **Wire-verified 2026-09-22** (Burp capture of `com.schoology.app` v2026.06.0 runtime login).
+> The flow below corrects the earlier decompilation-derived assumptions: token requests are
+> GET (not POST), credentials are authorized via an unsigned web-host endpoint, and every
+> API call is OAuth 1.0a signed. JWT exists in the code (`JwtModule`) but was **not
+> exercised** in the observed flow.
+
 ```mermaid
 sequenceDiagram
     autonumber
     participant U as User
     participant LM as LoginManager
     participant LF as AbstractLoginFlow<br/>(Native/ExternalBrowser/AppSso/QR)
-    participant API as api.schoology.com
-    participant Ok as OkHttp (JWT Interceptor)
-    participant Retro as Retrofit API
+    participant WEB as app.schoology.com<br/>(web host)
+    participant API as api.schoology.com<br/>(API host)
     participant Store as AuthToken Storage
     participant FCM as Firebase FCM
 
     U->>LM: initiate login
     LM->>LF: select flow
-    LF->>API: POST /v1/oauth/request_token
-    API-->>LF: request_token + secret
+    LF->>WEB: GET /oauth/timestamp (unsigned)
+    WEB-->>LF: server epoch seconds<br/>(clock-skew offset stored)
+    LF->>API: GET /v1/oauth/request_token<br/>Authorization: OAuth … oauth_token="" …
+    API-->>LF: oauth_token + oauth_token_secret<br/>+ xoauth_token_ttl=3600
     LF->>U: credentials prompt / QR / browser
     U-->>LF: credentials / scan
-    LF->>API: POST /v1/oauth/access_token
+    LF->>WEB: POST /oauth/authorize_auto<br/>(UNSIGNED form: user, password, oauth_token)
+    WEB-->>LF: 204 No Content (token now bound to user)
+    LF->>API: GET /v1/oauth/access_token<br/>(signed with request token, no verifier)
     API-->>LF: access_token + secret (AuthToken)
-    LF->>Store: persist AuthToken (+ UserInfo)
+    LF->>Store: persist AuthToken (+ clock offset + UserInfo)
+    LF->>API: GET /v1/users/me (signed)
+    API-->>LF: 303 → /v1/users/{uid}
+    LF->>API: GET /v1/users/{uid} (RE-SIGNED — never auto-follow)
+    API-->>LF: user object (see wire shape below)
+    LF->>Store: persist UserInfo
     LM-->>U: login success
 
-    Ok->>API: POST /jwt/token (OAuth 1.0a signed)
-    API-->>Store: JWT token string
-    Store-->>Ok: cache JWT token
-
-    Store-->>Ok: token on each request
-    Ok->>Retro: signed requests (JWT signer interceptor)
-    Retro->>API: /v1/* endpoints
-    API-->>Retro: JSON responses
-
-    alt JWT expired or 401 Unauthorized
-        Ok->>Store: invalidate cache
-        Ok->>API: POST /jwt/token (OAuth 1.0a signed)
-        API-->>Store: new JWT token
-        Store-->>Ok: refresh token
-        Ok->>Retro: retry request once
-    else 401 again
-        Ok->>LM: onAuthenticationFailure
-    end
+    Note over LF,API: Every subsequent /v1/* request carries<br/>Authorization: OAuth 1.0a (HMAC-SHA1) signature<br/>computed per request with the access token.
 
     Note over LM,FCM: Post-login
     LM->>FCM: register FCM token<br/>(FirebaseNotificationRegistrar)
     FCM-->>LM: registration id
 ```
+
+### Wire-verified signature details
+- Every OAuth request includes `oauth_token=""` (empty string) in the signature base and
+  header when no token is held yet — it is **not omitted**.
+- Timestamps use server epoch from `/oauth/timestamp` plus the recorded offset, protecting
+  HMAC-SHA1 signatures against device clock skew.
+- `/oauth/authorize_auto` is a plain `application/x-www-form-urlencoded` POST with **no
+  Authorization header**; the request token alone binds the authorization.
+- `/v1/users/me` answers `303 See Other` with `Location: /v1/users/{uid}`. Clients must
+  re-sign the redirect target; auto-following re-sends a signature computed for the wrong
+  path and fails.
+- Observed response envelope for token steps: `application/x-www-form-urlencoded`
+  (`oauth_token=…&oauth_token_secret=…`).
+- No JWT issuance was observed in the verified mobile flow (`POST /v1/jwt/token` remains
+  implemented in the app's JwtModule and retained for later use).
+
+### JwtModule behavior (from decompilation — retained, not yet wire-observed)
+The app ships a parallel JWT layer (`JwtSignerInterceptor`, `JwtCache`, `JwtAuthenticator`,
+`JwtAuthenticatorApi @GET|POST /jwt/token`). From static analysis, when active it:
+- obtains a JWT via `/jwt/token` (OAuth-signed),
+- caches it and attaches `Authorization: Bearer <token>` on requests,
+- on 401, invalidates the cache, re-issues `/jwt/token`, and retries the request once,
+- escalates to `onAuthenticationFailure` on a second 401.
+
+The 2026-09-22 capture did not observe this path (the v2026.06.0 runtime signs every
+request with OAuth 1.0a), but the layer remains present and should be treated as
+conditionally active (e.g. specific endpoints or newer builds).
 
 ---
 
@@ -228,13 +252,20 @@ All API base URLs are dynamically configurable via `ServerConfig` (SharedPrefere
 ## 7. REST API Endpoints Reference
 
 ### Auth Endpoints
-| Method | Path | Purpose |
-|--------|------|---------|
-| POST | `/v1/oauth/request_token` | OAuth request token |
-| POST | `/v1/oauth/access_token` | OAuth access token |
-| POST | `/jwt/token` | JWT token (OAuth-signed) |
-| GET | `/login/school_lookup` | School lookup |
-| GET | `/login/school_search` | School search |
+> Methods corrected 2026-09-22 from wire capture.
+
+| Method | Host | Path | Purpose |
+|--------|------|------|---------|
+| GET | app | `/oauth/timestamp` | Server epoch (clock-skew sync, unsigned) |
+| GET | api | `/v1/oauth/request_token` | OAuth request token (signed, `oauth_token=""`) |
+| POST | app | `/oauth/authorize_auto` | Bind request token to credentials (unsigned form: `user`, `password`, `oauth_token`) |
+| GET | api | `/v1/oauth/access_token` | OAuth access token (signed with request token, no verifier) |
+| POST | api | `/jwt/token` | JWT token (OAuth-signed) — **JwtModule layer, retained; not observed in v2026.06.0 captures** |
+| GET | api | `/login/school_lookup` | School lookup |
+| GET | api | `/login/school_search` | School search |
+
+Host key: `api` = `api.schoology.com` (per environment), `app` = `app.schoology.com`
+(environment web root, e.g. `https://app.schoology.com` for LIVE).
 
 ### Core API Endpoints (from decompiled `endpoints/*.java`)
 
@@ -334,11 +365,13 @@ All API base URLs are dynamically configurable via `ServerConfig` (SharedPrefere
 | GET | `/notifications/read` | Mark read |
 
 #### Misc
+> Methods corrected 2026-09-22 from wire capture: both batch endpoints are POST with a JSON body.
+
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/oauth/timestamp` | OAuth timestamp |
-| GET | `/multiget` | Multi-get batch |
-| GET | `/multioptions` | Multi-options |
+| GET | `/oauth/timestamp` | OAuth timestamp (web host — see Auth Endpoints) |
+| POST | `/v1/multiget` | Multi-get batch (`{"request": ["/v1/users/{uid}", …]}` → `{"response": [{location, response_code, body}]}`) |
+| POST | `/v1/multioptions` | Multi-options (`{"request": [paths]}` → `{"response": [{location, response_code, body: "METHOD"}]}`) |
 | GET | `/{path}` | Dynamic path |
 
 ### Sync/Download Endpoints (from `SyncManager` + `DownloadJob`)
@@ -579,6 +612,114 @@ Burp Suite confirmed the following runtime behaviors not visible in static analy
 6. CSRF token handling — `X-Csrf-Token` / `X-Csrf-Key` headers
 7. Empty sections/groups for parent role — parent sees only child data
 8. File attachment signed-URL flow — CloudFront + query-string signing
+
+---
+
+## 15. Wire-Verified Login & API Flow (2026-09-22)
+
+> Captured from a debuggable `com.schoology.app` v2026.06.0 build driving a live parent
+> login through Burp. All identifiers below are **anonymized placeholders** — no real
+> UIDs, names, emails, passwords, tokens, or consumer credentials appear in this document.
+> The flow was subsequently reproduced by a third-party client (login success verified).
+
+### Observed sequence (single login, in order)
+| # | Method | Host | Path | Notes |
+|---|--------|------|------|-------|
+| 1 | GET | app | `/oauth/timestamp` | Plain-text epoch; unsigned; response `1790134777`-style body |
+| 2 | GET | api | `/v1/oauth/request_token` | Signed; `oauth_token=""`; form-encoded response with `xoauth_token_ttl=3600` |
+| 3 | POST | app | `/oauth/authorize_auto` | **Unsigned**; body `password=…&user=…&oauth_token=…`; response 204 |
+| 4 | GET | api | `/v1/oauth/access_token` | Signed with request token; no `oauth_verifier`; form-encoded response |
+| 5 | GET | api | `/v1/users/me` | Signed; `303` + `Location: /v1/users/{uid}` |
+| 6 | GET | api | `/v1/users/{uid}` | **Re-signed** (fresh nonce/timestamp/signature) |
+| 7 | GET | api | `/v1/mobile/enabled_features` | `{"enabled_features":[…]}` |
+| 8 | GET | api | `/v1/mobile/me` | Settings: `course_dashboard_enabled`, `default_start_page`, `use_api_http_caching`, `firebase_performance_enabled` |
+| 9 | GET | api | `/v1/mobile/gainsight/me` | Gainsight apiKey + user/account context |
+| 10 | POST | api | `/v1/multioptions` | Probes methods for `/v1/users/{uid}/grades` (returns `GET`) |
+| 11 | OPTIONS | api | `/v1/messages` | Capability probe → `Allow: POST` |
+| 12 | GET | api | `/v1/users/{uid}/sections` | `{"section":[],"links":{"self":…}}` |
+| 13 | GET | api | `/v1/mobile/notifications?app_version=…&os_version=…&language=en&platform=android` | `{"schema_version":1,"messages":[]}` |
+| 14 | GET | api | `/v1/sessionstart?domain=app.schoology.com` | Sets `SESS…` cookie scoped to `.api.schoology.com` |
+| 15 | GET | api | `/v1/recent?with_attachments=TRUE&limit=10&start=0&richtext=1` | `{"update":[…]}` school feed |
+| 16 | POST | api | `/v1/multiget` | `{"request":["/v1/users/{child_uid}","/v1/users/{teacher_uid}"]}` batch |
+
+### Wire user object shape (`/v1/users/{uid}`)
+Fields observed (values anonymized):
+
+```json
+{
+  "uid": "<uid>",                       // numeric, string-form also present as "uid"
+  "id": 0,                              // numeric duplicate of uid
+  "school_id": 0,
+  "synced": 0,
+  "school_uid": "",
+  "building_id": 0,
+  "additional_buildings": "",
+  "name_title": "",
+  "name_title_show": 0,
+  "name_first": "",
+  "name_first_preferred": "",
+  "use_preferred_first_name": "1",
+  "name_middle": "",
+  "name_middle_show": 0,
+  "name_last": "",
+  "name_display": "",
+  "username": "",
+  "primary_email": "",
+  "picture_url": "https://asset-cdn.schoology.com/…",
+  "gender": null,
+  "position": "Parent",                  // also observed "Teacher"
+  "grad_year": "",
+  "role_id": 0,
+  "tz_offset": -7,
+  "tz_name": "America/Los_Angeles",
+  "parents": null,
+  "child_uids": "",                      // comma-separated child uids (parent accounts)
+  "send_message": 1,
+  "stats_user_type": 3,                  // 3 = parent, 1 = staff/teacher observed
+  "language": "en",
+  "permissions": { "is_directory_public": 0, "allow_connections": 0, "is_enterprise_user": 1 }
+}
+```
+
+Role derivation: `position: "Parent"` and/or `stats_user_type: 3` ⇒ parent.
+`child_uids` is the parent→child link used with `/v1/multiget` to fetch child users.
+
+### Wire envelope keys (collection endpoints use SINGULAR resource keys)
+| Endpoint | Envelope |
+|----------|----------|
+| `GET /v1/users/{uid}/sections` | `{"section": […], "links": {"self": …}}` |
+| `GET /v1/recent` | `{"update": […], …}` |
+| `GET /v1/mobile/notifications` | `{"schema_version": 1, "messages": […]}` |
+| `GET /v1/mobile/enabled_features` | `{"enabled_features": […]}` |
+| `POST /v1/multiget` / `/v1/multioptions` | `{"response": [{location, response_code, body…}]}` (207 Multi-Status) |
+
+### Request characteristics
+- **Cookie `s_mobile`** is sent on API requests once established.
+- **Two user agents**: `okhttp/4.8.0` (primary API client) and
+  `Google-HTTP-Java-Client/1.39.2` (sessionstart, multiget, recent — background/sync paths).
+- `Accepted-Language: en-US` header on user-facing API calls.
+- `OPTIONS /v1/messages` capability probe returns `Allow: POST` before first message use.
+- `X-Schoology: API` and `X-Schoology-Env: deploy` response headers confirm the API tier.
+- 200 responses carry `Etag` + `Cache-Control: no-cache` (caching-friendly but revalidating).
+
+### Parent-role behaviors (confirmed)
+- `/v1/users/{parent_uid}/sections` → empty `section` array (parents hold no sections).
+- Child context arrives via `child_uids` on the user object + `/v1/multiget` of child users.
+- Feature flags observed: `s_school_android_enable_offline`,
+  `s_school_mobile_enable_lti_assignment`, `s_school_ios_help_center`,
+  `s_school_mobile_enable_assessments`, `s_school_ios_wkwebview_assessments_enabled`.
+- Corroborates the 2026-09-18 finding: parents consume child data through
+  `/iapi/parent/*` (web) and `child_uids` + `multiget` (mobile API).
+
+### Impact on third-party clients
+1. Sign every `/v1/*` request with OAuth 1.0a (HMAC-SHA1) — no Bearer JWT on this path.
+2. Include `oauth_token=""` in the signature base before any token is held.
+3. Sync clock from `/oauth/timestamp` before first signature.
+4. Re-sign `/v1/users/{uid}` after the `/v1/users/me` 303.
+5. Parse envelopes by **any array-valued key** (resource name varies: `section`, `update`,
+   `messages`, `enabled_features`), not a fixed `data`/`results` key.
+6. Expect numeric IDs in user objects (`uid`, `id`, `school_id`, `building_id`) alongside
+   `name_first`/`name_display`/`primary_email` field names.
 
 ---
 - JWT tokens stored in persistent storage

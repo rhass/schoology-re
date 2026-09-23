@@ -64,33 +64,50 @@ flowchart TB
 
 ## 2. Authentication & Network Flow
 
+> **Wire-verified 2026-09-22** from a debuggable v2026.06.0 runtime login through Burp.
+> Corrects the earlier decompilation-derived assumptions: token requests are GET (not
+> POST), credentials are bound via an unsigned web-host endpoint, and the runtime signs
+> every API request with OAuth 1.0a. The JWT layer (JwtModule) remains in the app but was
+> not exercised in this flow — retained here for later use.
+
 ```mermaid
 sequenceDiagram
     autonumber
     participant U as User
     participant LM as LoginManager
     participant LF as AbstractLoginFlow<br/>(Native/ExternalBrowser/AppSso/QR)
-    participant API as api.schoology.com
-    participant Ok as OkHttp (JWT Interceptor)
+    participant WEB as app.schoology.com<br/>(web host)
+    participant API as api.schoology.com<br/>(API host)
+    participant Ok as OkHttp<br/>(OAuth 1.0a signer)
     participant Retro as Retrofit API
     participant Store as AuthToken Storage
     participant FCM as Firebase FCM
 
     U->>LM: initiate login
     LM->>LF: select flow
-    LF->>API: POST /v1/oauth/request_token
-    API-->>LF: request_token + secret
+    LF->>WEB: GET /oauth/timestamp (unsigned)
+    WEB-->>LF: server epoch (clock-skew offset)
+    LF->>API: GET /v1/oauth/request_token<br/>(signed, oauth_token="")
+    API-->>LF: oauth_token + secret + ttl=3600
     LF->>U: credentials prompt / QR / browser
     U-->>LF: credentials / scan
-    LF->>API: POST /v1/oauth/access_token
+    LF->>WEB: POST /oauth/authorize_auto<br/>(UNSIGNED: user, password, oauth_token)
+    WEB-->>LF: 204 No Content
+    LF->>API: GET /v1/oauth/access_token<br/>(signed with request token, no verifier)
     API-->>LF: access_token + secret (AuthToken)
-    LF->>Store: persist AuthToken (+ UserInfo)
+    LF->>Store: persist AuthToken + clock offset (+ UserInfo)
+    LF->>API: GET /v1/users/me (signed)
+    API-->>LF: 303 → /v1/users/{uid}
+    LF->>API: GET /v1/users/{uid} (RE-SIGNED)
+    API-->>LF: user object (uid, name_display, position, child_uids…)
+    LF->>Store: persist AuthToken + UserInfo
     LM-->>U: login success
 
-    Store-->>Ok: token on each request
-    Ok->>Retro: signed requests (JWT signer interceptor)
+    Ok->>Retro: OAuth-signed /v1/* requests<br/>(per-request HMAC-SHA1 signature)
     Retro->>API: /v1/* endpoints
-    API-->>Retro: JSON responses
+    API-->>Retro: JSON (singular envelope keys:<br/>section / update / messages / enabled_features)
+
+    Note over Ok,API: JWT layer (JwtModule) is present but not<br/>observed in v2026.06.0: POST /v1/jwt/token<br/>→ Bearer cache → 401 refresh-retry-once.<br/>Retained for later use.
 
     Note over LM,FCM: Post-login
     LM->>FCM: register FCM token<br/>(FirebaseNotificationRegistrar)
